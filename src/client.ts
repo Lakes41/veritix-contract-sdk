@@ -20,6 +20,7 @@ import {
 import type { Transaction } from '@stellar/stellar-sdk';
 
 import { TokenModule } from './modules/token';
+import { EscrowModule } from './modules/escrow';
 import type { EscrowRecord, TransactionResult } from './types';
 import { VeriTixError, VeriTixErrorCode } from './utils/errors';
 import { DUMMY_PUBLIC_KEY, assertValidAddress } from './utils/network';
@@ -86,18 +87,26 @@ export class VeriTixClient {
   ledgerCache: { sequence: number; fetchedAt: number } | null = null;
 
   readonly token: TokenModule;
+  readonly escrow: EscrowModule;
   private readonly keypair?: Keypair;
   private readonly listeners = new Map<string, Set<ClientListener>>();
 
-  /** Minimal escrow read surface used by the watch helpers (issue #615). */
-  readonly escrow: { getEscrow: (id: bigint) => Promise<EscrowRecord> } = {
-    getEscrow: (id: bigint) => this.readEscrow(id),
-  };
+  /**
+   * Sets the RPC server and synchronizes it with all modules.
+   * Tests use this to inject mocks without calling connect().
+   */
+  setServer(server: WatchServer | null): void {
+    this.server = server;
+    // Cast to the module server type since WatchServer has optional methods
+    this.token.server = server as any;
+    this.escrow.server = server as any;
+  }
 
   constructor(config: NetworkConfig, keypair?: Keypair) {
     this.config = config;
     this.keypair = keypair;
     this.token = new TokenModule(config, keypair);
+    this.escrow = new EscrowModule(config, keypair);
   }
 
   /**
@@ -283,6 +292,13 @@ export class VeriTixClient {
 
     for (;;) {
       const record = await this.escrow.getEscrow(id);
+      if (!record) {
+        if (Date.now() >= deadline) {
+          throw new VeriTixError(VeriTixErrorCode.WatchTimeout, `Timed out watching escrow ${id}`);
+        }
+        await sleep(intervalMs);
+        continue;
+      }
       if (record.released || record.refunded) {
         yield record;
         return;
@@ -338,30 +354,6 @@ export class VeriTixClient {
       throw new VeriTixError(VeriTixErrorCode.SimulationFailed, `Simulation of ${method} returned no value`);
     }
     return scValToNative(retval);
-  }
-
-  private async readEscrow(id: bigint): Promise<EscrowRecord> {
-    if (!this.server?.simulateTransaction) {
-      throw new VeriTixError(VeriTixErrorCode.NotConnected, 'call connect() before reading escrow state');
-    }
-    const result = await this.server.simulateTransaction(
-      this.buildContractCall('get_escrow', [bigintToScVal(id, 'u64')]),
-    );
-    const retval = (result as { result?: { retval?: xdr.ScVal } } | undefined)?.result?.retval;
-    if (retval === undefined) {
-      throw new VeriTixError(VeriTixErrorCode.SimulationFailed, `get_escrow(${id}) simulation returned no value`);
-    }
-    const native = scValToNative(retval) as Record<string, unknown>;
-    return {
-      id: typeof native.id === 'bigint' ? native.id : BigInt(String(native.id ?? id)),
-      depositor: String(native.depositor ?? ''),
-      beneficiary: String(native.beneficiary ?? ''),
-      amount: typeof native.amount === 'bigint' ? native.amount : BigInt(String(native.amount ?? '0')),
-      released: Boolean(native.released),
-      refunded: Boolean(native.refunded),
-      expiryLedger: Number(native.expiry_ledger ?? native.expiryLedger ?? 0),
-      memos: Array.isArray(native.memos) ? native.memos.map(String) : [],
-    };
   }
 
   private buildContractCall(method: string, args: xdr.ScVal[] = []): Transaction {
