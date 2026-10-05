@@ -281,7 +281,10 @@ export class VeriTixClient {
 
     for (;;) {
       const record = await this.escrow.getEscrow(id);
-      if (record && (record.released || record.refunded)) {
+      if (!record) {
+        throw new VeriTixError(VeriTixErrorCode.EscrowNotFound, `Escrow ${id} not found`);
+      }
+      if (record.released || record.refunded) {
         yield record;
         return;
       }
