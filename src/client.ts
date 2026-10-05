@@ -20,6 +20,7 @@ import {
 import type { Transaction } from '@stellar/stellar-sdk';
 
 import { TokenModule } from './modules/token';
+import { EscrowModule } from './modules/escrow';
 import type { EscrowRecord, TransactionResult } from './types';
 import { VeriTixError, VeriTixErrorCode } from './utils/errors';
 import { DUMMY_PUBLIC_KEY, assertValidAddress } from './utils/network';
@@ -86,18 +87,15 @@ export class VeriTixClient {
   ledgerCache: { sequence: number; fetchedAt: number } | null = null;
 
   readonly token: TokenModule;
+  readonly escrow: EscrowModule;
   private readonly keypair?: Keypair;
   private readonly listeners = new Map<string, Set<ClientListener>>();
-
-  /** Minimal escrow read surface used by the watch helpers (issue #615). */
-  readonly escrow: { getEscrow: (id: bigint) => Promise<EscrowRecord> } = {
-    getEscrow: (id: bigint) => this.readEscrow(id),
-  };
 
   constructor(config: NetworkConfig, keypair?: Keypair) {
     this.config = config;
     this.keypair = keypair;
     this.token = new TokenModule(config, keypair);
+    this.escrow = new EscrowModule(config, keypair, this);
   }
 
   /**
@@ -283,6 +281,9 @@ export class VeriTixClient {
 
     for (;;) {
       const record = await this.escrow.getEscrow(id);
+      if (!record) {
+        throw new VeriTixError(VeriTixErrorCode.EscrowNotFound, `Escrow ${id} not found`);
+      }
       if (record.released || record.refunded) {
         yield record;
         return;
